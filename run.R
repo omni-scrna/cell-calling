@@ -1,80 +1,111 @@
 #!/usr/bin/env Rscript
-# EmptyDrops cell calling module
+# cell calling module
 #
-# Reads a raw 10x H5 matrix, runs emptyDrops to identify real cells,
-# assigns species (human/mouse/ambiguous), and writes a filtered h5ad matrix.
+# Reads a raw h5ad matrix runs emptyDrops per pool,
+# assigns species (human/mouse/ambiguous),
+# creates sample_id = "{pool_id}_{species}", and writes a TSV of called cell barcodes.
 
 suppressPackageStartupMessages({
   library(DropletUtils)
   library(anndataR)
+  library(SingleCellExperiment)
+  library(data.table)
 })
 
-script_dir <- (function() {
-  cargs <- commandArgs(trailingOnly = FALSE)
-  m <- grep("^--file=", cargs)
-  if (length(m) > 0) dirname(sub("^--file=", "", cargs[[m]])) else getwd()
-})()
-source(file.path(script_dir, "src", "cli.R"))
+# arg parsing
+source("src/common/cli.R")
+p <- arg_parser("Cell calling module")
+p <- add_base_args(p)
+p <- add_stage_args(p, "cell_calling")
+p <- add_argument(p, "--fdr_threshold", type = "numeric", default = 0.01, help = "FDR threshold for EmptyDrops")
+p <- add_argument(p, "--passthrough", flag = TRUE, help = "create empty placeholder instead of running cell calling")
+args <- parse_args(p)
 
-# Count human vs mouse reads per cell — genes are identified by genome prefix (e.g., hg19_, mm10_, GRCh38_)
-# Compute ratios: human_ratio = human_counts / (human_counts + mouse_counts), same for mouse
-# Assign species: whichever ratio is higher → that species. The max ratio is stored as majority_ratio
-# Filter ambiguous cells: cells below the 5th percentile of majority_ratio (1st percentile for hgmm1k) are labeled "ambiguous" 
+# logging
+cat(sprintf("Full command: %s\n", paste(commandArgs(trailingOnly = FALSE), collapse = " ")))
+cat(sprintf("LOG: command line args\n----------------------------------\n"))
+for (i in 1:length(args)) {
+  cat(sprintf("  %s: %s\n", names(args)[i], args[[i]]))
+}
+cat(sprintf("----------------------------------\n"))
+
 
 assign_species <- function(sce, quantile = 5) {
-  genomes <- rowData(sce)$genome
-  unique_genomes <- unique(genomes)
-
-  is_human <- grepl("^(hg|GRCh)", unique_genomes)
-  is_mouse <- grepl("^(mm|GRCm)", unique_genomes)
-  human_genome <- unique_genomes[is_human]
-  mouse_genome <- unique_genomes[is_mouse]
 
   mat <- counts(sce)
-  human_counts <- colSums(mat[genomes == human_genome, , drop = FALSE])
-  mouse_counts <- colSums(mat[genomes == mouse_genome, , drop = FALSE])
-  total <- human_counts + mouse_counts
+  rn  <- rownames(mat)
 
-  human_ratio <- human_counts / total
-  mouse_ratio <- mouse_counts / total
+  # get sum of counts for human and mouse genes per cell
+  human_sums <- colSums(mat[startsWith(rn, "GRCh38_"), , drop = FALSE])
+  mouse_sums <- colSums(mat[startsWith(rn, "GRCm39_"), , drop = FALSE])
 
-  species_raw <- ifelse(human_ratio > mouse_ratio, "human", "mouse")
-  majority_ratio <- pmax(human_ratio, mouse_ratio)
+  dt <- data.table(
+    cell_id = colnames(sce),
+    human_sums = human_sums,
+    mouse_sums = mouse_sums
+  )
 
-  thresh <- quantile(majority_ratio, probs = quantile / 100)
-  species <- ifelse(majority_ratio > thresh, species_raw, "ambiguous")
+  dt[, total_sums := human_sums + mouse_sums]
+  dt[, human_ratios := human_sums / total_sums]
+  dt[, mouse_ratios := mouse_sums / total_sums]
+  dt[, species_majority_ratio := pmax(human_ratios, mouse_ratios)]
 
-  colData(sce)$species <- species
-  colData(sce)$majority_ratio <- majority_ratio
-  sce
+  # get lower bound for majority ratios based on the specified percentile.
+  thresh <- quantile(dt$species_majority_ratio, probs = quantile / 100, na.rm = TRUE)
+
+  # asign species
+  dt[, species_raw := fifelse(human_ratios > mouse_ratios, "human", "mouse")]
+  dt[, species := fifelse(species_majority_ratio > thresh, species_raw, "ambiguous")]
+
+  return(dt[, .(cell_id, species, species_majority_ratio)])
 }
 
 
 main <- function() {
-  args <- parse_args_checked()
-  message(sprintf("Full command: %s", paste(commandArgs(trailingOnly = FALSE), collapse = " ")))
-  for (k in names(args)) message(sprintf("  %s: %s", k, args[[k]]))
-
   dir.create(args$output_dir, showWarnings = FALSE, recursive = TRUE)
 
-  message("  reading raw matrix")
-  sce <- read10xCounts(args$rawdata_h5, type = "HDF5")
+  if (args$passthrough) {
+    out_path <- file.path(args$output_dir, paste0(args$name, "_called_cells.tsv"))
+    file.create(out_path)
+    cat(sprintf("  wrote empty file:: %s\n", out_path))
+    quit(save = "no", status = 0)
+  }
 
-  message("  running emptyDrops")
-  e_out <- emptyDrops(counts(sce))
+  message("  reading raw h5ad ..")
+  sce <- read_h5ad(args$rawdata_raw_h5ad, as = "SingleCellExperiment")
+  pools <- unique(colData(sce)$pool_id)
 
-  is_cell <- e_out$FDR <= args$fdr_threshold
-  is_cell[is.na(is_cell)] <- FALSE
-  sce_filtered <- sce[, is_cell]
+  cells_dt_ls <- lapply(pools, function(pool){
 
-  message("  assigning species")
-  sce_filtered <- assign_species(sce_filtered, quantile = args$species_quantile)
-  message(sprintf("  species counts: %s",
-    paste(names(table(colData(sce_filtered)$species)),
-          table(colData(sce_filtered)$species), sep = "=", collapse = ", ")))
+    message(sprintf("  --- processing pool: %s ---", pool))
+    pool_idx <- which(colData(sce)$pool_id == pool)
+    sce_pool <- sce[, pool_idx]
 
-  out_path <- file.path(args$output_dir, paste0(args$name, "_filtered.h5ad"))
-  write_h5ad(sce_filtered, out_path)
+    message("  running emptyDrops ..")
+    edrops_out <- emptyDrops(counts(sce_pool))
+
+    is_cell <- edrops_out$FDR <= args$fdr_threshold
+    is_cell[is.na(is_cell)] <- FALSE
+    sce_filtered <- sce_pool[, is_cell]
+    message(sprintf("  %d cells after filtering", ncol(sce_filtered)))
+
+    message("  assigning species ..")
+    cell_dt <- assign_species(sce_filtered)
+    
+    cell_dt[, pool_id := pool]
+    cell_dt[, sample_id := paste0(pool, "_", species)]
+
+    message(sprintf("  species counts: %s",
+      paste(names(table(cell_dt$species)),
+            table(cell_dt$species), sep = "=", collapse = ", ")))
+
+    return(cell_dt)
+  })
+
+  out_dt <- rbindlist(cells_dt_ls)
+
+  out_path <- file.path(args$output_dir, paste0(args$name, "_called_cells.tsv"))
+  fwrite(out_dt, out_path,sep = "\t", quote = FALSE, row.names = FALSE)
   message(sprintf("  wrote: %s", out_path))
 }
 

@@ -1,0 +1,8 @@
+{
+  "stage": "cell_calling",
+  "version": "0.1.0",
+  "benchmark": "omni-scrna/ambient-plan",
+  "args": [
+    { "flag": "--rawdata_raw_h5ad", "type": "path", "help": "Raw h5ad count matrix (unfiltered, with pool_id in obs)" }
+  ]
+}
