@@ -36,3 +36,23 @@ SCHEMA_DIR <- "src/common/schema"
 
 add_base_args  <- function(p) .inject(p, file.path(SCHEMA_DIR, "_base.json"))
 add_stage_args <- function(p, schema) .inject(p, file.path(SCHEMA_DIR, paste0(schema, ".json")))
+
+# EXPERIMENTAL (api_version >= 0.8.0 / design 009): the engine now passes
+# `--output <id>=<path>` once per declared output, unconditionally -- on top
+# of (not instead of) --output_dir/--name. argparser has no "ignore unknown
+# flags" mode and errors on them, so strip these pairs before parse_args().
+# Pass the result as parse_args(p, argv = strip_output_args()).
+strip_output_args <- function(argv = commandArgs(trailingOnly = TRUE)) {
+  keep <- rep(TRUE, length(argv))
+  i <- 1
+  while (i <= length(argv)) {
+    if (argv[i] == "--output" && i < length(argv)) {
+      keep[i] <- FALSE
+      keep[i + 1] <- FALSE
+      i <- i + 2
+    } else {
+      i <- i + 1
+    }
+  }
+  argv[keep]
+}
