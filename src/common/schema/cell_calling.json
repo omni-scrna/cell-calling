@@ -1,8 +1,9 @@
 {
   "stage": "cell_calling",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "benchmark": "omni-scrna/ambient-plan",
   "args": [
-    { "flag": "--rawdata_h5ad", "type": "path", "help": "Raw h5ad count matrix (unfiltered, one pool per dataset)" }
+    { "flag": "--rawdata_h5ad", "type": "path", "help": "Raw h5ad count matrix (unfiltered, one pool per dataset)" },
+    { "flag": "--properties_info", "type": "path", "help": "Dataset properties.yaml (batch_var/sample_var/labels_var/tenx_assay)" }
   ]
 }

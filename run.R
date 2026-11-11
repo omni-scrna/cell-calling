@@ -1,13 +1,15 @@
 #!/usr/bin/env Rscript
 # 
-# Reads a raw h5ad matrix (one pool/dataset) and runs emptyDrops, writing a TSV
-# of called cell barcodes.
+# Reads a raw h5ad matrix (one pool or sample /dataset) and runs emptyDrops, writing a TSV
+# of called cell barcodes. For flex datasets (properties.yaml's tenx_assay == "flex"),
+# emptyDrops is run separately per probe_id rather than once over the whole pool.
 
 suppressPackageStartupMessages({
   library(DropletUtils)
   library(anndataR)
   library(SingleCellExperiment)
   library(data.table)
+  library(yaml)
 })
 
 # arg parsing
@@ -30,20 +32,39 @@ main <- function() {
   dir.create(args$output_dir, showWarnings = FALSE, recursive = TRUE)
 
   message("  reading raw h5ad ..")
-  # x_mapping: must match the x_mapping="counts" used on write, or the
-  # reconstructed assay is named "X" instead of "counts" (DropletUtils/
-  # decontX expect an assay literally named "counts").
   sce <- read_h5ad(args$rawdata_h5ad, as = "SingleCellExperiment", x_mapping = "counts")
 
-  message("  running emptyDrops ..")
-  edrops_out <- emptyDrops(counts(sce))
+  message("  keeping only RNA (Gene Expression) features ..")
+  sce <- sce[rowData(sce)$feature_type == "Gene Expression", ]
 
-  is_cell <- edrops_out$FDR <= args$fdr_threshold
-  is_cell[is.na(is_cell)] <- FALSE
-  sce_filtered <- sce[, is_cell]
-  message(sprintf("  %d cells after filtering", ncol(sce_filtered)))
+  properties <- read_yaml(args$properties_info)
 
-  out_dt <- data.table(cell_id = colnames(sce_filtered))
+  if (properties$tenx_assay == "flex") {
+    # call cells separately for each probe_id
+    message("  flex dataset: running emptyDrops per probe_id ..")
+    if (!"probe_id" %in% colnames(colData(sce))) {
+      stop("tenx_assay is 'flex' but colData(sce) has no 'probe_id' column")
+    }
+
+    called_ids <- unlist(lapply(unique(colData(sce)$probe_id), function(pid) {
+      in_probe <- colData(sce)$probe_id == pid
+      message(sprintf("    probe_id %s: %d barcodes", pid, sum(in_probe)))
+      edrops_out <- emptyDrops(counts(sce)[, in_probe])
+      is_cell <- edrops_out$FDR <= args$fdr_threshold
+      is_cell[is.na(is_cell)] <- FALSE
+      colnames(sce)[in_probe][is_cell]
+    }))
+  } else {
+    message("  running emptyDrops ..")
+    edrops_out <- emptyDrops(counts(sce))
+    is_cell <- edrops_out$FDR <= args$fdr_threshold
+    is_cell[is.na(is_cell)] <- FALSE
+    called_ids <- colnames(sce)[is_cell]
+  }
+
+  message(sprintf("  %d cells after filtering", length(called_ids)))
+
+  out_dt <- data.table(cell_id = called_ids)
 
   out_path <- file.path(args$output_dir, paste0(args$name, "_called_cells.tsv"))
   fwrite(out_dt, out_path, sep = "\t", quote = FALSE, row.names = FALSE)
