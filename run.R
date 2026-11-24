@@ -18,6 +18,7 @@ p <- arg_parser("Cell calling module")
 p <- add_base_args(p)
 p <- add_stage_args(p, "cell_calling")
 p <- add_argument(p, "--fdr_threshold", type = "numeric", default = 0.01, help = "FDR threshold for EmptyDrops")
+p <- add_argument(p, "--seed", type = "integer", default = 42, help = "Random seed (emptyDrops Monte Carlo p-values)")
 args <- parse_args(p, argv = strip_output_args())
 
 # logging
@@ -38,6 +39,10 @@ main <- function() {
   sce <- sce[rowData(sce)$feature_type == "Gene Expression", ]
 
   properties <- read_yaml(args$properties_info)
+
+  # emptyDrops computes Monte Carlo p-values, so the called cells change
+  # between runs without a fixed seed.
+  set.seed(args$seed)
 
   if (properties$tenx_assay == "flex") {
     # call cells separately for each probe_id
