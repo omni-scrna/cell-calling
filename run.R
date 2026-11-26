@@ -19,6 +19,8 @@ p <- add_base_args(p)
 p <- add_stage_args(p, "cell_calling")
 p <- add_argument(p, "--fdr_threshold", type = "numeric", default = 0.01, help = "FDR threshold for EmptyDrops")
 p <- add_argument(p, "--seed", type = "integer", default = 42, help = "Random seed (emptyDrops Monte Carlo p-values)")
+p <- add_argument(p, "--method", type = "character", default = "emptydrops",
+                  help = "emptydrops | emptydrops_cellranger (DropletUtils::emptyDropsCellRanger)")
 args <- parse_args(p, argv = strip_output_args())
 
 # logging
@@ -28,6 +30,11 @@ for (i in 1:length(args)) {
   cat(sprintf("  %s: %s\n", names(args)[i], args[[i]]))
 }
 cat(sprintf("----------------------------------\n"))
+
+# emptyDrops() or emptyDropsCellRanger(), both with their default settings
+run_emptydrops <- function(m) {
+  if (args$method == "emptydrops_cellranger") emptyDropsCellRanger(m) else emptyDrops(m)
+}
 
 main <- function() {
   dir.create(args$output_dir, showWarnings = FALSE, recursive = TRUE)
@@ -54,14 +61,14 @@ main <- function() {
     called_ids <- unlist(lapply(unique(colData(sce)$probe_id), function(pid) {
       in_probe <- colData(sce)$probe_id == pid
       message(sprintf("    probe_id %s: %d barcodes", pid, sum(in_probe)))
-      edrops_out <- emptyDrops(counts(sce)[, in_probe])
+      edrops_out <- run_emptydrops(counts(sce)[, in_probe])
       is_cell <- edrops_out$FDR <= args$fdr_threshold
       is_cell[is.na(is_cell)] <- FALSE
       colnames(sce)[in_probe][is_cell]
     }))
   } else {
     message("  running emptyDrops ..")
-    edrops_out <- emptyDrops(counts(sce))
+    edrops_out <- run_emptydrops(counts(sce))
     is_cell <- edrops_out$FDR <= args$fdr_threshold
     is_cell[is.na(is_cell)] <- FALSE
     called_ids <- colnames(sce)[is_cell]
